@@ -23,10 +23,14 @@ import urllib.parse
 
 from lib.utils.file_utils import *
 from lib.utils.terminal_size import get_terminal_size
-from thirdparty.colorama import *
+from thirdparty.colorama import init, Fore, Back, Style
 
 if sys.platform in ["win32", "msys"]:
     from thirdparty.colorama.win32 import *
+
+
+class NoColor:
+    RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = BRIGHT = RESET_ALL = ''
 
 
 class CLIOutput(object):
@@ -39,7 +43,8 @@ class CLIOutput(object):
         self.blacklists = {}
         self.basePath = None
         self.errors = 0
-        self.color = color
+        if not color:
+            self.disableColors()
 
     def inLine(self, string):
         self.erase()
@@ -63,7 +68,7 @@ class CLIOutput(object):
             sys.stdout.write("\033[0G")
 
     def newLine(self, string):
-        if self.lastInLine is True:
+        if self.lastInLine:
             self.erase()
 
         if sys.platform in ["win32", "msys"]:
@@ -93,7 +98,7 @@ class CLIOutput(object):
         finally:
             contentLength = FileUtils.size_human(size)
 
-        showPath = "/" + self.basePath.lstrip("/") + path
+        showPath = "/" + self.basePath + path
 
         if full_url:
             parsed = urllib.parse.urlparse(self.target)
@@ -106,23 +111,21 @@ class CLIOutput(object):
             showPath,
         )
 
-        if self.color:
-            if status == 200:
-                message = Fore.GREEN + message + Style.RESET_ALL
+        if status == 200:
+            message = Fore.GREEN + message + Style.RESET_ALL
 
-            elif status == 401:
-                message = Fore.YELLOW + message + Style.RESET_ALL
+        elif status == 401:
+            message = Fore.YELLOW + message + Style.RESET_ALL
 
-            elif status == 403:
-                message = Fore.BLUE + message + Style.RESET_ALL
+        elif status == 403:
+            message = Fore.BLUE + message + Style.RESET_ALL
 
-            elif status == 500:
-                message = Fore.RED + message + Style.RESET_ALL
+        elif status == 500:
+            message = Fore.RED + message + Style.RESET_ALL
 
         # Check if redirect
         if status in [301, 302, 303, 307, 308]:
-            if self.color:
-                message = Fore.CYAN + message + Style.RESET_ALL
+            message = Fore.CYAN + message + Style.RESET_ALL
             if "location" in [h.lower() for h in response.headers]:
                 message += "  ->  {0}".format(response.headers["location"])
 
@@ -144,7 +147,7 @@ class CLIOutput(object):
         if allJobs > 1:
             message += "Job: {0}/{1} - ".format(currentJob, allJobs)
 
-        if self.errors > 0:
+        if self.errors:
             message += "Errors: {0} - ".format(self.errors)
 
         message += "Last request to: {0}".format(path)
@@ -162,22 +165,17 @@ class CLIOutput(object):
         with self.mutex:
             stripped = reason.strip()
             message = "\n" if reason.startswith("\n") else ""
-            if self.color:
-                message += Style.BRIGHT + Fore.WHITE + Back.RED + stripped + Style.RESET_ALL
-            else:
-                message += stripped
+            message += Style.BRIGHT + Fore.WHITE + Back.RED + stripped + Style.RESET_ALL
 
             self.newLine(message)
 
     def warning(self, message):
         with self.mutex:
-            if self.color:
-                message = Style.BRIGHT + Fore.YELLOW + message + Style.RESET_ALL
+            message = Style.BRIGHT + Fore.YELLOW + message + Style.RESET_ALL
             self.newLine(message)
 
     def header(self, message):
-        if self.color:
-            message = Style.BRIGHT + Fore.MAGENTA + message + Style.RESET_ALL
+        message = Style.BRIGHT + Fore.MAGENTA + message + Style.RESET_ALL
         self.newLine(message)
 
     def config(
@@ -190,68 +188,43 @@ class CLIOutput(object):
         method,
     ):
 
-        if self.color:
-            separator = Fore.MAGENTA + " | " + Fore.YELLOW
+        separator = Fore.MAGENTA + " | " + Fore.YELLOW
 
-            config = Style.BRIGHT + Fore.YELLOW
-            config += "Extensions: {0}".format(Fore.CYAN + extensions + Fore.YELLOW)
+        config = Style.BRIGHT + Fore.YELLOW
+        config += "Extensions: {0}".format(Fore.CYAN + extensions + Fore.YELLOW)
+        config += separator
+
+        if prefixes:
+            config += 'Prefixes: {0}'.format(Fore.CYAN + prefixes + Fore.YELLOW)
             config += separator
 
-            config += "HTTP method: {0}".format(Fore.CYAN + method.upper() + Fore.YELLOW)
+        if suffixes:
+            config += 'Suffixes: {0}'.format(Fore.CYAN + suffixes + Fore.YELLOW)
             config += separator
 
-            if prefixes != '':
-                config += 'Prefixes: {0}'.format(Fore.CYAN + prefixes + Fore.YELLOW)
-                config += separator
+        config += "HTTP method: {0}".format(Fore.CYAN + method.upper() + Fore.YELLOW)
+        config += separator
 
-            if suffixes != '':
-                config += 'Suffixes: {0}'.format(Fore.CYAN + suffixes + Fore.YELLOW)
-                config += separator
+        config += "Threads: {0}".format(Fore.CYAN + threads + Fore.YELLOW)
+        config += separator
+        config += "Wordlist size: {0}".format(Fore.CYAN + wordlist_size + Fore.YELLOW)
 
-            config += "Threads: {0}".format(Fore.CYAN + threads + Fore.YELLOW)
-            config += separator
-            config += "Wordlist size: {0}".format(Fore.CYAN + wordlist_size + Fore.YELLOW)
+        config += Style.RESET_ALL
 
-            config += Style.RESET_ALL
-
-            self.newLine(config)
-        else:
-            separator = " | "
-
-            config = "Extensions: {0}".format(extensions)
-            config += separator
-
-            config += "HTTP method: {0}".format(method.upper())
-            config += separator
-
-            if prefixes != '':
-                config += 'Prefixes: {0}'.format(prefixes)
-                config += separator
-
-            if suffixes != '':
-                config += 'Suffixes: {0}'.format(suffixes)
-                config += separator
-
-            config += "Threads: {0}".format(threads)
-            config += separator
-            config += "Wordlist size: {0}".format(wordlist_size)
-
-            self.newLine(config)
+        self.newLine(config)
 
     def setTarget(self, target):
         if not target.endswith("/"):
             target += "/"
-        if not target.startswith("http://") and not target.startswith("https://") and "://" not in target:
+        if not target.startswith(("http://", "https://")) and "://" not in target:
             target = "http://" + target
 
         self.target = target
 
-        if self.color:
-            config = Style.BRIGHT + Fore.YELLOW
-            config += "\nTarget: {0}\n".format(Fore.CYAN + target + Fore.YELLOW)
-            config += Style.RESET_ALL
-        else:
-            config = "\nTarget: {0}\n".format(target)
+        config = Style.BRIGHT + Fore.YELLOW
+        config += "\nTarget: {0}\n".format(Fore.CYAN + target + Fore.YELLOW)
+        config += Style.RESET_ALL
+
         self.newLine(config)
 
     def outputFile(self, target):
@@ -264,3 +237,10 @@ class CLIOutput(object):
         with self.mutex:
             line = "[{0}] - {1}".format(time.strftime("%H:%M:%S"), info)
             self.newLine(line)
+
+    def disableColors(self):
+        global Fore
+        global Style
+        global Back
+
+        Fore = Style = Back = NoColor

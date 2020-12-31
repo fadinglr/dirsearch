@@ -21,10 +21,14 @@ import threading
 import urllib.parse
 
 from lib.utils.file_utils import *
-from thirdparty.colorama import *
+from thirdparty.colorama import init, Fore, Style
 
 if sys.platform in ["win32", "msys"]:
     from thirdparty.colorama.win32 import *
+
+
+class NoColor:
+    RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = BRIGHT = RESET_ALL = ''
 
 
 class PrintOutput(object):
@@ -35,7 +39,8 @@ class PrintOutput(object):
         self.mutexCheckedPaths = threading.Lock()
         self.basePath = None
         self.errors = 0
-        self.color = color
+        if not color:
+            self.disableColors()
 
     def header(self, text):
         pass
@@ -78,7 +83,7 @@ class PrintOutput(object):
         finally:
             contentLength = FileUtils.size_human(size)
 
-        showPath = "/" + self.basePath.lstrip("/") + path
+        showPath = "/" + self.basePath + path
 
         parsed = urllib.parse.urlparse(self.target)
         showPath = "{0}://{1}{2}".format(parsed.scheme, parsed.netloc, showPath)
@@ -87,25 +92,23 @@ class PrintOutput(object):
             status, contentLength.rjust(6, " "), showPath
         )
 
-        if self.color:
-            if status == 200:
-                message = Fore.GREEN + message + Style.RESET_ALL
+        if status == 200:
+            message = Fore.GREEN + message + Style.RESET_ALL
 
-            elif status == 401:
-                message = Fore.YELLOW + message + Style.RESET_ALL
+        elif status == 401:
+            message = Fore.YELLOW + message + Style.RESET_ALL
 
-            elif status == 403:
-                message = Fore.BLUE + message + Style.RESET_ALL
+        elif status == 403:
+            message = Fore.BLUE + message + Style.RESET_ALL
 
-            elif status == 500:
-                message = Fore.RED + message + Style.RESET_ALL
+        elif status == 500:
+            message = Fore.RED + message + Style.RESET_ALL
 
         # Check if redirect
         if status in [301, 302, 307] and "location" in [
             h.lower() for h in response.headers
         ]:
-            if self.color:
-                message = Fore.CYAN + message + Style.RESET_ALL
+            message = Fore.CYAN + message + Style.RESET_ALL
             message += "  ->  {0}".format(response.headers["location"])
 
         if addedToQueue:
@@ -152,3 +155,10 @@ class PrintOutput(object):
     def debug(self, info):
         with self.mutex:
             self.newLine(info)
+
+    def disableColors(self):
+        global Fore
+        global Style
+        global Back
+
+        Fore = Style = Back = NoColor

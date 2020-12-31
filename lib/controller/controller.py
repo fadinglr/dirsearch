@@ -38,7 +38,7 @@ class SkipTargetInterrupt(Exception):
 
 MAYOR_VERSION = 0
 MINOR_VERSION = 4
-REVISION = 0
+REVISION = 1
 VERSION = {
     "MAYOR_VERSION": MAYOR_VERSION,
     "MINOR_VERSION": MINOR_VERSION,
@@ -112,23 +112,27 @@ class Controller(object):
         self.excludeSizes = self.arguments.excludeSizes
         self.excludeTexts = self.arguments.excludeTexts
         self.excludeRegexps = self.arguments.excludeRegexps
+        self.excludeRedirects = self.arguments.excludeRedirects
         self.recursive = self.arguments.recursive
         self.minimumResponseSize = self.arguments.minimumResponseSize
         self.maximumResponseSize = self.arguments.maximumResponseSize
-        self.scanSubdirs = (
-            list(dict.fromkeys(arguments.scanSubdirs)) if arguments.scanSubdirs else []
-        )
+        self.scanSubdirs = arguments.scanSubdirs
         self.excludeSubdirs = (
             arguments.excludeSubdirs if arguments.excludeSubdirs else []
         )
 
         self.dictionary = Dictionary(
-            self.arguments.wordlist, self.arguments.extensions,
-            self.arguments.suffixes, self.arguments.prefixes,
-            self.arguments.lowercase, self.arguments.uppercase,
-            self.arguments.capitalization, self.arguments.forceExtensions,
-            self.arguments.noDotExtensions, self.arguments.excludeExtensions,
-            self.arguments.noExtension, self.arguments.onlySelected
+            self.arguments.wordlist,
+            self.arguments.extensions,
+            self.arguments.suffixes,
+            self.arguments.prefixes,
+            self.arguments.lowercase,
+            self.arguments.uppercase,
+            self.arguments.capitalization,
+            self.arguments.forceExtensions,
+            self.arguments.excludeExtensions,
+            self.arguments.noExtension,
+            self.arguments.onlySelected
         )
 
         self.allJobs = len(self.urlList) * (len(self.scanSubdirs) if self.scanSubdirs else 1)
@@ -138,6 +142,7 @@ class Controller(object):
         self.threadsLock = Lock()
         self.batch = False
         self.batchSession = None
+        self.got429 = False
 
         self.output.header(program_banner)
         self.printConfig()
@@ -160,6 +165,7 @@ class Controller(object):
                     self.reportManager = ReportManager()
                     self.currentUrl = url
                     self.output.setTarget(self.currentUrl)
+                    self.ignore429 = False
 
                     try:
                         self.requester = Requester(
@@ -168,7 +174,6 @@ class Controller(object):
                             useragent=self.arguments.useragent,
                             maxPool=self.arguments.threadsCount,
                             maxRetries=self.arguments.maxRetries,
-                            delay=self.arguments.delay,
                             timeout=self.arguments.timeout,
                             ip=self.arguments.ip,
                             proxy=self.arguments.proxy,
@@ -212,6 +217,7 @@ class Controller(object):
                         self.dictionary,
                         testFailPath=self.arguments.testFailPath,
                         threads=self.arguments.threadsCount,
+                        delay=self.arguments.delay,
                         matchCallbacks=matchCallbacks,
                         notFoundCallbacks=notFoundCallbacks,
                         errorCallbacks=errorCallbacks,
@@ -264,7 +270,6 @@ class Controller(object):
 
     def getBlacklists(self):
         reext = re.compile(r'\%ext\%', re.IGNORECASE)
-        reextdot = re.compile(r'\.\%ext\%', re.IGNORECASE)
         blacklists = {}
 
         for status in [400, 403, 500]:
@@ -284,18 +289,13 @@ class Controller(object):
                 if line.lstrip().startswith("#"):
                     continue
 
-                line = line.lstrip("/")
+                if line.startswith("/"):
+                    line = line[1:]
 
                 # Classic dirsearch blacklist processing (with %EXT% keyword)
                 if "%ext%" in line.lower():
                     for extension in self.arguments.extensions:
-                        if self.arguments.noDotExtensions:
-                            entry = reextdot.sub(extension, line)
-
-                        else:
-                            entry = line
-
-                        entry = reext.sub(extension, entry)
+                        entry = reext.sub(extension, line)
 
                         blacklists[status].append(entry)
 
@@ -496,65 +496,74 @@ class Controller(object):
     def matchCallback(self, path):
         self.index += 1
 
-        if path.status:
+        if path.status == 429:
+            self.got429 = True
+            return
 
-            if path.status not in self.excludeStatusCodes and (
-                    not self.includeStatusCodes or path.status in self.includeStatusCodes
-            ) and (
-                    not self.blacklists.get(path.status) or path.path not in self.blacklists.get(path.status)
-            ) and (
-                    not self.excludeSizes or FileUtils.size_human(len(path.response.body)).strip() not in self.excludeSizes
-            ) and (
-                    not self.minimumResponseSize or self.minimumResponseSize < len(path.response.body)
-            ) and (
-                    not self.maximumResponseSize or self.maximumResponseSize > len(path.response.body)
-            ):
+        if (
+                path.status and path.status not in self.excludeStatusCodes
+        ) and (
+                not self.includeStatusCodes or path.status in self.includeStatusCodes
+        ) and (
+                not self.blacklists.get(path.status) or path.path not in self.blacklists.get(path.status)
+        ) and (
+                not self.excludeSizes or FileUtils.size_human(len(path.response.body)).strip() not in self.excludeSizes
+        ) and (
+                not self.minimumResponseSize or self.minimumResponseSize < len(path.response.body)
+        ) and (
+                not self.maximumResponseSize or self.maximumResponseSize > len(path.response.body)
+        ):
 
-                for excludeText in self.excludeTexts:
-                    if excludeText in path.response.body.decode('iso8859-1'):
-                        del path
-                        return
+            for excludeText in self.excludeTexts:
+                if excludeText in path.response.body.decode('iso8859-1'):
+                    del path
+                    return
 
-                for excludeRegexp in self.excludeRegexps:
-                    if (
-                        re.search(excludeRegexp, path.response.body.decode('iso8859-1'))
-                        is not None
-                    ):
-                        del path
-                        return
+            for excludeRegexp in self.excludeRegexps:
+                if (
+                    re.search(excludeRegexp, path.response.body.decode('iso8859-1'))
+                    is not None
+                ):
+                    del path
+                    return
 
-                pathIsInScanSubdirs = False
-                addedToQueue = False
+            for excludeRedirect in self.excludeRedirects:
+                if path.response.redirect and (
+                    re.match(excludeRedirect, path.response.redirect)
+                    is not None
+                ):
+                    del path
+                    return
 
-                if self.scanSubdirs:
-                    for subdir in self.scanSubdirs:
-                        if subdir == path.path + "/":
-                            pathIsInScanSubdirs = True
+            pathIsInScanSubdirs = False
+            addedToQueue = False
 
-                if not pathIsInScanSubdirs:
-                    if not self.recursive:
-                        pass
+            if self.scanSubdirs:
+                for subdir in self.scanSubdirs:
+                    if subdir == path.path + "/":
+                        pathIsInScanSubdirs = True
 
-                    elif path.response.redirect:
-                        addedToQueue = self.addRedirectDirectory(path)
+            if self.recursive and not pathIsInScanSubdirs and "?" not in path.path:
+                if path.response.redirect:
+                    addedToQueue = self.addRedirectDirectory(path)
 
-                    else:
-                        addedToQueue = self.addDirectory(path.path)
+                else:
+                    addedToQueue = self.addDirectory(path.path)
 
-                self.output.statusReport(
-                    path.path, path.response, self.arguments.full_url, addedToQueue
-                )
+            self.output.statusReport(
+                path.path, path.response, self.arguments.full_url, addedToQueue
+            )
 
-                if self.arguments.matches_proxy:
-                    self.requester.request(path.path, proxy=self.arguments.matches_proxy)
+            if self.arguments.matches_proxy:
+                self.requester.request(path.path, proxy=self.arguments.matches_proxy)
 
-                newPath = "{}{}".format(self.currentDirectory, path.path)
+            newPath = "{}{}".format(self.currentDirectory, path.path)
 
-                self.reportManager.addPath(newPath, path.status, path.response)
+            self.reportManager.addPath(newPath, path.status, path.response)
 
-                self.reportManager.save()
+            self.reportManager.save()
 
-                del path
+            del path
 
     def notFoundCallback(self, path):
         self.index += 1
@@ -581,56 +590,68 @@ class Controller(object):
             self.errorLog.write(os.linesep + line)
             self.errorLog.flush()
 
-    def handleInterrupt(self):
-        self.output.warning("CTRL+C detected: Pausing threads, please wait...")
+    def handlePause(self, message):
+        self.output.warning(message)
         self.fuzzer.pause()
 
-        try:
-            while True:
-                msg = "[e]xit / [c]ontinue"
+        while 1:
+            if self.fuzzer.stopped == len(self.fuzzer.threads):
+                self.fuzzer.stopped = 0
+                break
 
-                if not self.directories.empty():
-                    msg += " / [n]ext"
+        while True:
+            msg = "[e]xit / [c]ontinue"
 
-                if len(self.urlList) > 1:
-                    msg += " / [s]kip target"
+            if not self.directories.empty():
+                msg += " / [n]ext"
 
-                self.output.inLine(msg + ": ")
+            if self.got429 and not self.ignore429:
+                msg += " / [i]gnore"
 
-                option = input()
+            if len(self.urlList) > 1:
+                msg += " / [s]kip target"
 
-                if option.lower() == "e":
-                    self.exit = True
-                    self.fuzzer.stop()
-                    raise KeyboardInterrupt
+            self.output.inLine(msg + ": ")
 
-                elif option.lower() == "c":
-                    self.fuzzer.play()
+            option = input()
+
+            if self.got429:
+                self.got429 = False
+                if option.lower() == "i":
+                    self.ignore429 = True
+                    self.fuzzer.resume()
                     return
 
-                elif not self.directories.empty() and option.lower() == "n":
-                    self.fuzzer.stop()
-                    return
+            if option.lower() == "e":
+                self.exit = True
+                self.fuzzer.stop()
+                self.output.error("\nCanceled by the user")
+                exit(0)
 
-                elif len(self.urlList) > 1 and option.lower() == "s":
-                    raise SkipTargetInterrupt
+            elif option.lower() == "c":
+                self.fuzzer.resume()
+                return
 
-                else:
-                    continue
+            elif option.lower() == "n" and not self.directories.empty():
+                self.fuzzer.stop()
+                return
 
-        except KeyboardInterrupt:
-            self.exit = True
-            raise KeyboardInterrupt
+            elif option.lower() == "s" and len(self.urlList) > 1:
+                raise SkipTargetInterrupt
+
+            else:
+                continue
 
     def processPaths(self):
         while True:
             try:
                 while not self.fuzzer.wait(0.3):
+                    if not self.ignore429 and self.got429:
+                        self.handlePause("429 Response code detected: Server is blocking requests...")
                     continue
                 break
-
-            except (KeyboardInterrupt, SystemExit):
-                self.handleInterrupt()
+            except (KeyboardInterrupt):
+                self.handlePause("CTRL+C detected: Pausing threads, please wait...")
 
     def wait(self):
         while not self.directories.empty():
