@@ -16,8 +16,12 @@
 #
 #  Author: Mauro Soria
 
+import sys
+import email
+
 from optparse import OptionParser, OptionGroup
 from ipaddress import IPv4Network
+from io import StringIO
 
 from lib.utils.default_config_parser import DefaultConfigParser
 from lib.utils.file_utils import File
@@ -34,6 +38,8 @@ class ArgumentParser(object):
 
         self.quiet = options.quiet
         self.full_url = options.full_url
+        self.urlList = None
+        self.raw_file = None
 
         if not options.url:
 
@@ -57,6 +63,25 @@ class ArgumentParser(object):
 
             elif options.cidr:
                 self.urlList = [str(ip) for ip in IPv4Network(options.cidr)]
+
+            elif options.stdin_urls:
+                self.urlList = sys.stdin.read().splitlines()
+
+            elif options.raw_file:
+                with File(options.raw_file) as raw_content:
+                    if not raw_content.exists():
+                        print("The file with the raw request does not exist")
+                        exit(1)
+
+                    if not raw_content.is_valid():
+                        print("The file with the raw request is invalid")
+                        exit(1)
+
+                    if not raw_content.can_read():
+                        print("The file with the raw request cannot be read")
+                        exit(1)
+
+                self.raw_file = options.raw_file
 
             else:
                 print("URL target is missing, try using -u <url>")
@@ -105,21 +130,15 @@ class ArgumentParser(object):
             options.requestByHostname = True
 
         elif options.proxy:
-            if options.proxy.startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
-                self.proxy = options.proxy
-            else:
-                self.proxy = "http://" + options.proxy
-
+            self.proxy = options.proxy
             options.requestByHostname = True
 
         else:
             self.proxy = None
 
         if options.matches_proxy:
-            if options.matches_proxy.startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
-                self.matches_proxy = options.matches_proxy
-            else:
-                self.matches_proxy = "http://" + options.matches_proxy
+            self.matches_proxy = options.matches_proxy
+            options.requestByHostname = True
 
         else:
             self.matches_proxy = None
@@ -127,10 +146,7 @@ class ArgumentParser(object):
         if options.headers:
             try:
                 self.headers = dict(
-                    (key, value)
-                    for (key, value) in (
-                        header.split(":", 1) for header in options.headers
-                    )
+                    email.message_from_file(StringIO("\r\n".join(options.headers)))
                 )
             except Exception:
                 print("Invalid headers")
@@ -154,9 +170,11 @@ class ArgumentParser(object):
                         print("The header list cannot be read")
                         exit(1)
 
-                    lines = hlist.get_lines()
-                    for line in lines:
-                        key, value = line.split(":")[0], line.split(":")[1]
+                    headers = dict(
+                        email.message_from_file(StringIO(hlist.read()))
+                    )
+
+                    for key, value in headers.items():
                         self.headers[key] = value
             except Exception as e:
                 print("Error in headers file: " + str(e))
@@ -167,6 +185,9 @@ class ArgumentParser(object):
                 "php", "inc.php", "jsp", "jsf", "asp", "aspx", "do", "action", "cgi",
                 "pl", "html", "htm", "js", "css", "json", "txt", "tar.gz", "tgz"
             ]
+        elif options.extensions == "CHANGELOG.md":
+            print("A weird extension was provided: CHANGELOG.md. Please do not use * as the extension or enclose it in double quotes")
+            exit(0)
         else:
             self.extensions = list(
                 oset([extension.lstrip(' .') for extension in options.extensions.split(",")])
@@ -336,22 +357,12 @@ class ArgumentParser(object):
         else:
             self.scanSubdirs = []
 
-        if not self.recursive and options.excludeSubdirs:
-            self.excludeSubdirs = None
-
-        elif options.excludeSubdirs:
+        if options.excludeSubdirs:
             self.excludeSubdirs = list(
-                oset([subdir.strip() for subdir in options.excludeSubdirs.split(",")])
+                oset(
+                    [subdir.strip(" /") + "/" for subdir in options.excludeSubdirs.split(",")]
+                )
             )
-
-            for i in range(len(self.excludeSubdirs)):
-
-                while self.excludeSubdirs[i].startswith("/"):
-                    self.excludeSubdirs[i] = self.excludeSubdirs[i][1:]
-
-                while self.excludeSubdirs[i].endswith("/"):
-                    self.excludeSubdirs[i] = self.excludeSubdirs[i][:-1]
-            self.excludeSubdirs = list(oset(self.excludeSubdirs))
 
         else:
             self.excludeSubdirs = None
@@ -362,11 +373,16 @@ class ArgumentParser(object):
 
         self.redirect = options.followRedirects
         self.httpmethod = options.httpmethod
+        self.scheme = options.scheme
         self.requestByHostname = options.requestByHostname
         self.exit_on_error = options.exit_on_error
         self.debug = options.debug
 
         self.recursive_level_max = options.recursive_level_max
+
+        if self.scheme not in ["http", "https"]:
+            print("Invalid URI scheme: {0}".format(self.scheme))
+            exit(1)
 
     def parseConfig(self):
         config = DefaultConfigParser()
@@ -420,7 +436,7 @@ class ArgumentParser(object):
 
         # Request
         self.httpmethod = config.safe_get(
-            "request", "httpmethod", "get", ["get", "head", "post", "put", "patch", "delete", "trace", "options", "debug", "connect"]
+            "request", "httpmethod", "get"
         )
         self.headerList = config.safe_get("request", "headers-file", None)
         self.redirect = config.safe_getboolean("request", "follow-redirects", False)
@@ -433,7 +449,8 @@ class ArgumentParser(object):
         self.maxRetries = config.safe_getint("connection", "max-retries", 3)
         self.proxy = config.safe_get("connection", "proxy", None)
         self.proxylist = config.safe_get("connection", "proxy-list", None)
-        self.matches_proxy = config.safe_get("connection", "matches-proxy", None)
+        self.scheme = config.safe_get("connection", "scheme", "http", ["http", "https"])
+        self.matches_proxy = config.safe_get("connection", "replay-proxy", None)
         self.requestByHostname = config.safe_getboolean(
             "connection", "request-by-hostname", False
         )
@@ -453,7 +470,10 @@ information at https://github.com/maurosoria/dirsearch.""")
         mandatory.add_option("-u", "--url", help="Target URL", action="store", type="string", dest="url", default=None)
         mandatory.add_option("-l", "--url-list", help="URL list file", action="store", type="string", dest="urlList",
                              default=None, metavar="FILE")
+        mandatory.add_option("--stdin", help="URL list from STDIN", action="store_true", dest="stdin_urls")
         mandatory.add_option("--cidr", help="Target CIDR", action="store", type="string", dest="cidr", default=None)
+        mandatory.add_option("--raw", help="File contains the raw request (use `--scheme` flag to set the scheme)", action="store",
+                             dest="raw_file", metavar="FILE")
         mandatory.add_option("-e", "--extensions", help="Extension list separated by commas (Example: php,asp)",
                              action="store", dest="extensions", default=self.defaultExtensions)
         mandatory.add_option("-X", "--exclude-extensions", action="store", dest="excludeExtensions", default=self.excludeExtensions,
@@ -471,7 +491,7 @@ information at https://github.com/maurosoria/dirsearch.""")
         dictionary.add_option("--suffixes", action="store", dest="suffixes", default=self.suffixes,
                               help="Add custom suffixes to all entries, ignore directories (separated by commas)")
         dictionary.add_option("--only-selected", dest="onlySelected", action="store_true",
-                              help="Only entries with selected extensions or no extension + directories")
+                              help="Only directories + files with selected extensions (or no extension)")
         dictionary.add_option("--remove-extensions", dest="noExtension", action="store_true",
                               help="Remove extensions in all wordlist entries (Example: admin.php -> admin)")
         dictionary.add_option("-U", "--uppercase", action="store_true", dest="uppercase", default=self.uppercase,
@@ -503,7 +523,7 @@ information at https://github.com/maurosoria/dirsearch.""")
                            action="store", dest="excludeTexts", default=self.excludeTexts, metavar="TEXTS")
         general.add_option("--exclude-regexps", help="Exclude responses by regexps, separated by commas (Example: 'Not foun[a-z]{1}', '^Error$')",
                            action="store", dest="excludeRegexps", default=self.excludeRegexps, metavar="REGEXPS")
-        general.add_option("--exclude-redirects", help="Exclude responses by redirect regexps or texts, separated by commas (Example: 'https:/oath.okta.com/*')",
+        general.add_option("--exclude-redirects", help="Exclude responses by redirect regexps or texts, separated by commas (Example: 'https://okta.com/*')",
                            action="store", dest="excludeRedirects", default=self.excludeRedirects, metavar="REGEXPS")
         general.add_option("--calibration", help="Path to test for calibration", action="store",
                            dest="testFailPath", default=self.testFailPath, metavar="PATH")
@@ -548,8 +568,10 @@ information at https://github.com/maurosoria/dirsearch.""")
                               help="Proxy URL, support HTTP and SOCKS proxies (Example: localhost:8080, socks5://localhost:8088)", metavar="PROXY")
         connection.add_option("--proxy-list", action="store", dest="proxyList", type="string",
                               default=self.proxylist, help="File contains proxy servers", metavar="FILE")
-        connection.add_option("--matches-proxy", action="store", dest="matches_proxy", type="string", default=self.matches_proxy,
+        connection.add_option("--replay-proxy", action="store", dest="matches_proxy", type="string", default=self.matches_proxy,
                               help="Proxy to replay with found paths", metavar="PROXY")
+        connection.add_option("--scheme", help="Default scheme (for raw request or if there is no scheme in the URL)", action="store",
+                              default=self.scheme, dest="scheme", metavar="SCHEME")
         connection.add_option("--max-retries", action="store", dest="maxRetries", type="int",
                               default=self.maxRetries, metavar="RETRIES")
         connection.add_option("-b", "--request-by-hostname",
